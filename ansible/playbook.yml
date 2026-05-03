@@ -1,0 +1,336 @@
+---
+- name: Configure Minecraft server
+  hosts: minecraft
+  become: true
+  gather_facts: true
+
+  vars:
+    minecraft_dir: /home/ubuntu/minecraft
+    data_dir: /home/ubuntu/minecraft/data
+    compose_file: /home/ubuntu/minecraft/docker-compose.yml
+    container_name: minecraft-server
+    minecraft_port: 25565
+    rcon_port: 25575
+    memory: "2G"
+    max_players: 10
+    mc_version: "1.21.1"
+    mc_type: "VANILLA"
+
+
+  # System prerequisites
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install system packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - unzip
+          - git
+          - build-essential
+          - python3-pip
+        state: present
+
+    # Docker
+
+    - name: Create Docker keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ ansible_architecture | replace('x86_64','amd64') }}
+          signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/ubuntu
+          {{ ansible_distribution_release }} stable
+        filename: docker
+        state: present
+
+    - name: Install Docker packages
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Enable and start Docker service
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Add ubuntu user to docker group
+      ansible.builtin.user:
+        name: ubuntu
+        groups: docker
+        append: true
+
+    # AWS CLI 
+
+    - name: Check if AWS CLI is already installed
+      ansible.builtin.command: aws --version
+      register: aws_cli_check
+      changed_when: false
+      failed_when: false
+
+    - name: Download AWS CLI v2 installer
+      ansible.builtin.get_url:
+        url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+        dest: /tmp/awscliv2.zip
+        mode: "0644"
+      when: aws_cli_check.rc != 0
+
+    - name: Unzip AWS CLI installer
+      ansible.builtin.unarchive:
+        src: /tmp/awscliv2.zip
+        dest: /tmp/
+        remote_src: true
+      when: aws_cli_check.rc != 0
+
+    - name: Install AWS CLI
+      ansible.builtin.command: /tmp/aws/install
+      args:
+        creates: /usr/local/bin/aws
+      when: aws_cli_check.rc != 0
+
+    - name: Clean up AWS CLI installer
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/awscliv2.zip
+        - /tmp/aws
+      when: aws_cli_check.rc != 0
+
+
+  # Minecraft directory and persistent volume
+
+
+    - name: Create minecraft working directory
+      ansible.builtin.file:
+        path: "{{ minecraft_dir }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+    - name: Create persistent data directory
+      ansible.builtin.file:
+        path: "{{ data_dir }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+
+  # World restore from S3 
+
+    - name: Check if world data already exists
+      ansible.builtin.find:
+        paths: "{{ data_dir }}"
+        file_type: any
+      register: data_dir_contents
+
+    - name: Find latest backup in S3
+      ansible.builtin.command: >
+        aws s3 ls s3://{{ s3_bucket }}/backups/
+        --region {{ aws_region }}
+        --recursive
+        --query "sort_by(Contents, &LastModified)[-1].Key"
+        --output text
+      register: latest_backup
+      changed_when: false
+      become_user: ubuntu
+      when: data_dir_contents.matched == 0
+
+    - name: Download and restore world from S3
+      ansible.builtin.shell: |
+        set -e
+        echo "[restore] Downloading s3://{{ s3_bucket }}/{{ latest_backup.stdout }} ..."
+        aws s3 cp s3://{{ s3_bucket }}/{{ latest_backup.stdout }} /tmp/restore.tar.gz \
+          --region {{ aws_region }}
+        echo "[restore] Extracting into {{ data_dir }} ..."
+        tar -xzf /tmp/restore.tar.gz -C {{ data_dir }}
+        rm -f /tmp/restore.tar.gz
+        echo "[restore] Done."
+      become_user: ubuntu
+      when:
+        - data_dir_contents.matched == 0
+        - latest_backup.stdout is defined
+        - latest_backup.stdout != "None"
+        - latest_backup.stdout | length > 0
+
+    - name: Log world restore outcome
+      ansible.builtin.debug:
+        msg: >-
+          {% if data_dir_contents.matched > 0 %}
+          Data directory already populated – skipping S3 restore (idempotent).
+          {% elif latest_backup.stdout is defined and latest_backup.stdout != 'None' %}
+          Restored world from S3: {{ latest_backup.stdout }}
+          {% else %}
+          No S3 backup found – server will generate a fresh world.
+          {% endif %}
+
+
+  # ECR authentication and image pull
+
+    - name: Authenticate Docker to ECR using instance profile
+      ansible.builtin.shell: |
+        aws ecr get-login-password --region {{ aws_region }} | \
+        docker login --username AWS --password-stdin \
+        {{ ecr_repo_url | regex_replace('/[^/]+$', '') }}
+      become_user: ubuntu
+      changed_when: true   # ECR tokens expire; always refresh
+
+    - name: Pull pinned Minecraft image from ECR
+      community.docker.docker_image:
+        name: "{{ ecr_repo_url }}:{{ image_tag }}"
+        source: pull
+        force_source: false   # idempotent: skip if digest unchanged
+
+  # Docker Compose deployment
+
+    - name: Write docker-compose.yml
+      ansible.builtin.copy:
+        dest: "{{ compose_file }}"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          services:
+            minecraft:
+              image: {{ ecr_repo_url }}:{{ image_tag }}
+              container_name: {{ container_name }}
+              restart: unless-stopped
+              ports:
+                - "{{ minecraft_port }}:25565"
+                - "127.0.0.1:{{ rcon_port }}:25575"
+              environment:
+                EULA: "TRUE"
+                MOTD: "A Minecraft Server - {{ student_id }}"
+                MEMORY: "{{ memory }}"
+                TYPE: "{{ mc_type }}"
+                VERSION: "{{ mc_version }}"
+                DIFFICULTY: "normal"
+                MAX_PLAYERS: "{{ max_players }}"
+                ENABLE_RCON: "true"
+                RCON_PASSWORD: "changeme-set-in-env"
+                RCON_PORT: "25575"
+              volumes:
+                - {{ data_dir }}:/data
+
+    - name: Start Minecraft server via Docker Compose
+      community.docker.docker_compose_v2:
+        project_src: "{{ minecraft_dir }}"
+        state: present
+        recreate: auto    # Only recreates if compose file or image changed
+
+    - name: Wait for Minecraft server to finish loading
+      ansible.builtin.shell: |
+        for i in $(seq 1 18); do
+          sleep 10
+          if docker logs {{ container_name }} 2>&1 | grep -q "Done"; then
+            echo "SERVER_READY"
+            exit 0
+          fi
+          echo "Waiting... attempt $i/18"
+        done
+        echo "TIMEOUT – server may still be loading"
+        exit 0
+      register: mc_ready
+      changed_when: false
+
+    - name: Show Minecraft startup status
+      ansible.builtin.debug:
+        msg: "{{ mc_ready.stdout_lines }}"
+
+    - name: Verify container is running
+      community.docker.docker_container_info:
+        name: "{{ container_name }}"
+      register: mc_info
+
+    - name: Assert container is running
+      ansible.builtin.assert:
+        that:
+          - mc_info.container.State.Running == true
+        fail_msg: "Minecraft container is NOT running – check docker logs {{ container_name }}"
+        success_msg: "Minecraft container is running successfully."
+
+
+  # Backup script installation
+
+    - name: Write backup.sh
+      ansible.builtin.copy:
+        dest: "{{ minecraft_dir }}/backup.sh"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          set -e
+          BUCKET={{ s3_bucket }}
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          BACKUP_FILE=/tmp/mc-world-$TIMESTAMP.tar.gz
+          DATA_DIR={{ data_dir }}
+          COMPOSE_DIR={{ minecraft_dir }}
+          echo "[backup] Stopping server..."
+          docker compose -f $COMPOSE_DIR/docker-compose.yml stop
+          echo "[backup] Compressing world data..."
+          tar -czf $BACKUP_FILE -C $DATA_DIR .
+          echo "[backup] Uploading to S3..."
+          aws s3 cp $BACKUP_FILE s3://$BUCKET/backups/mc-world-$TIMESTAMP.tar.gz \
+            --region {{ aws_region }}
+          echo "[backup] Restarting server..."
+          docker compose -f $COMPOSE_DIR/docker-compose.yml start
+          echo "[done] s3://$BUCKET/backups/mc-world-$TIMESTAMP.tar.gz"
+          rm -f $BACKUP_FILE
+
+    - name: Write restore.sh
+      ansible.builtin.copy:
+        dest: "{{ minecraft_dir }}/restore.sh"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          set -e
+          BUCKET={{ s3_bucket }}
+          BACKUP_KEY=$1
+          DATA_DIR={{ data_dir }}
+          COMPOSE_DIR={{ minecraft_dir }}
+          if [ -z "$BACKUP_KEY" ]; then
+            echo "Usage: ./restore.sh backups/mc-world-YYYYMMDD-HHMMSS.tar.gz"
+            exit 1
+          fi
+          echo "[restore] Stopping server..."
+          docker compose -f $COMPOSE_DIR/docker-compose.yml stop
+          echo "[restore] Downloading from S3..."
+          aws s3 cp s3://$BUCKET/$BACKUP_KEY /tmp/restore.tar.gz \
+            --region {{ aws_region }}
+          echo "[restore] Preserving old data..."
+          mv $DATA_DIR ${DATA_DIR}.bak.$(date +%s)
+          mkdir -p $DATA_DIR
+          echo "[restore] Extracting..."
+          tar -xzf /tmp/restore.tar.gz -C $DATA_DIR
+          echo "[restore] Restarting server..."
+          docker compose -f $COMPOSE_DIR/docker-compose.yml start
+          echo "[done] Restore complete."
+          rm -f /tmp/restore.tar.gz

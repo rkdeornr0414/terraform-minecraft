@@ -1,0 +1,148 @@
+name: Publish Minecraft Image to ECR
+
+
+# Trigger: push a git tag matching mc-*  (e.g. mc-1.21-build3)
+# Example: git tag mc-1.21-build3 && git push origin mc-1.21-build3
+
+on:
+  push:
+    tags:
+      - "mc-*"
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: minecraft-server
+  SMOKE_TEST_TIMEOUT: 120  
+
+jobs:
+  build-test-push:
+    name: Build → Smoke Test → Push to ECR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set image tag from git tag
+        id: meta
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "IMAGE_TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building image with tag: $TAG"
+
+      # Configure AWS credentials
+      #   GitHub > Settings > Secrets and variables > Actions
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── 5. Acquire/build the deployable image
+      #
+      # Option A (default): re-tag the pinned upstream itzg image.
+      #   No Dockerfile needed; fast and reproducible.
+      # Option B: build from Dockerfile.
+      - name: Set ECR registry URL
+        run: |
+          echo "ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}" >> "$GITHUB_ENV"
+
+      # Option A – Re-tag upstream image
+      - name: Pull upstream itzg image and re-tag for ECR
+        run: |
+          IMAGE_TAG="${{ steps.meta.outputs.IMAGE_TAG }}"
+          docker pull itzg/minecraft-server:java21
+          docker tag  itzg/minecraft-server:java21 \
+            "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "Tagged as: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      # Option B – Build from Dockerfile (uncomment if using custom Dockerfile)
+      # - name: Build image from Dockerfile
+      #   run: |
+      #     IMAGE_TAG="${{ steps.meta.outputs.IMAGE_TAG }}"
+      #     docker build \
+      #       -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+      #       -f Dockerfile .
+
+      #  6. Smoke test
+      # Run the image for up to SMOKE_TEST_TIMEOUT seconds and verify the
+      # Minecraft server prints "Done" (indicates successful world load).
+      # The container is removed regardless of outcome (--rm).
+      - name: Smoke test – verify server initialises without errors
+        run: |
+          IMAGE_TAG="${{ steps.meta.outputs.IMAGE_TAG }}"
+          FULL_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "Starting smoke-test container..."
+          docker run -d \
+            --name smoke-mc \
+            -e EULA=TRUE \
+            -e MEMORY=1G \
+            -e TYPE=VANILLA \
+            -e VERSION=1.21.1 \
+            "$FULL_IMAGE"
+
+          echo "Polling for 'Done' message (up to ${{ env.SMOKE_TEST_TIMEOUT }} s)..."
+          ELAPSED=0
+          INTERVAL=10
+          FOUND=0
+
+          while [ $ELAPSED -lt ${{ env.SMOKE_TEST_TIMEOUT }} ]; do
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+            LOGS=$(docker logs smoke-mc 2>&1)
+
+            if echo "$LOGS" | grep -q "Done"; then
+              echo " Smoke test PASSED – server is ready after ${ELAPSED}s"
+              FOUND=1
+              break
+            fi
+
+            # Fail fast if the container has already stopped with an error
+            STATUS=$(docker inspect smoke-mc --format='{{.State.Status}}')
+            if [ "$STATUS" = "exited" ]; then
+              EXIT_CODE=$(docker inspect smoke-mc --format='{{.State.ExitCode}}')
+              if [ "$EXIT_CODE" != "0" ]; then
+                echo " Container exited with code $EXIT_CODE before server was ready"
+                docker logs smoke-mc
+                docker rm -f smoke-mc || true
+                exit 1
+              fi
+            fi
+
+            echo "  ${ELAPSED}s elapsed – still waiting..."
+          done
+
+          docker rm -f smoke-mc || true
+
+          if [ $FOUND -eq 0 ]; then
+            echo " Smoke test FAILED – 'Done' not found within ${{ env.SMOKE_TEST_TIMEOUT }}s"
+            exit 1
+          fi
+
+      # ── 7. Push to ECR
+      - name: Push image to ECR
+        run: |
+          IMAGE_TAG="${{ steps.meta.outputs.IMAGE_TAG }}"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "Pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      # ── 8. Summary
+      - name: Print pipeline summary
+        run: |
+          IMAGE_TAG="${{ steps.meta.outputs.IMAGE_TAG }}"
+          echo "## Pipeline Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Step | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tag trigger | \`$IMAGE_TAG\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image acquired | itzg/minecraft-server:java21 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Smoke test | Passed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Pushed to ECR | \`$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG\` |" >> "$GITHUB_STEP_SUMMARY"
