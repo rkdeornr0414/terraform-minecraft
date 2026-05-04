@@ -136,8 +136,6 @@ resource "aws_instance" "minecraft" {
     #!/bin/bash
     set -e
     apt-get update -y
-    apt-get install -y software-properties-common
-    add-apt-repository --yes --update ppa:ansible/ansible
     apt-get install -y ansible git
   EOF
 
