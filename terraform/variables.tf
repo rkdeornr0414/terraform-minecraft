@@ -91,5 +91,5 @@ variable "ansible_user" {
 variable "private_key_path" {
   description = "Absolute or relative path to the .pem private key on the machine running Terraform. Used by the null_resource local-exec provisioner to call ansible-playbook."
   type        = string
-  default     = "~/Downloads/cs312-key.pem"
+  default     = "/home/young/.ssh/cs312-key.pem"
 }

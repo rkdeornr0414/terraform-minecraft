@@ -109,7 +109,7 @@ resource "aws_instance" "minecraft" {
   ami                         = var.ami_id
   instance_type               = var.instance_type
   key_name                    = var.key_name
-  subnet_id                   = tolist(data.aws_subnets.public.ids)[0]
+  subnet_id                   = "subnet-001d9cde281524fbc"
   vpc_security_group_ids      = [aws_security_group.minecraft.id]
   associate_public_ip_address = true
 
@@ -148,37 +148,6 @@ resource "aws_instance" "minecraft" {
   }
 }
 
-# ── Ansible Integration 
-# null_resource with local-exec chains Ansible directly after terraform apply.
-# The provisioner runs on the machine executing Terraform (WSL), not on EC2.
-# It waits 30 s for SSH to become available before handing off to Ansible.
-
-resource "null_resource" "ansible_provision" {
-  # Re-run whenever the instance is replaced.
-  triggers = {
-    instance_id = aws_instance.minecraft.id
-  }
-
-  provisioner "local-exec" {
-    command = <<-CMD
-      echo "Waiting for SSH to become available..."
-      sleep 30
-
-      # Write a temporary inventory file pointing at the new public IP.
-      cat > /tmp/mc_inventory.ini <<INV
-      [minecraft]
-      ${aws_instance.minecraft.public_ip} ansible_user=${var.ansible_user} ansible_ssh_private_key_file=${var.private_key_path} ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-      INV
-
-      ansible-playbook \
-        -i /tmp/mc_inventory.ini \
-        ../ansible/playbook.yml \
-        --extra-vars "ecr_repo_url=${data.aws_iam_instance_profile.lab.name != "" ? "${local.ecr_url}" : ""} image_tag=${var.minecraft_image_tag} s3_bucket=${var.s3_backup_bucket} aws_region=${var.aws_region} student_id=${var.student_id}"
-    CMD
-  }
-
-  depends_on = [aws_instance.minecraft]
-}
 
 locals {
   ecr_url = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com/${var.ecr_repo_name}"
