@@ -51,14 +51,9 @@
         mode: "0644"
 
     - name: Add Docker apt repository
-      ansible.builtin.apt_repository:
-        repo: >-
-          deb [arch={{ ansible_architecture | replace('x86_64','amd64') }}
-          signed-by=/etc/apt/keyrings/docker.asc]
-          https://download.docker.com/linux/ubuntu
-          {{ ansible_distribution_release }} stable
-        filename: docker
-        state: present
+      ansible.builtin.shell: |
+            echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            sudo apt-get update -y
 
     - name: Install Docker packages
       ansible.builtin.apt:
@@ -158,6 +153,7 @@
         --output text
       register: latest_backup
       changed_when: false
+      failed_when: false
       become_user: ubuntu
       when: data_dir_contents.matched == 0
 
@@ -195,16 +191,16 @@
     - name: Authenticate Docker to ECR using instance profile
       ansible.builtin.shell: |
         aws ecr get-login-password --region {{ aws_region }} | \
-        docker login --username AWS --password-stdin \
+        sudo docker login --username AWS --password-stdin \
         {{ ecr_repo_url | regex_replace('/[^/]+$', '') }}
-      become_user: ubuntu
-      changed_when: true   # ECR tokens expire; always refresh
+      become: false
+      changed_when: true
 
     - name: Pull pinned Minecraft image from ECR
-      community.docker.docker_image:
-        name: "{{ ecr_repo_url }}:{{ image_tag }}"
-        source: pull
-        force_source: false   # idempotent: skip if digest unchanged
+      ansible.builtin.shell: |
+        sudo docker pull {{ ecr_repo_url }}:{{ image_tag }}
+      become: false
+      changed_when: true
 
   # Docker Compose deployment
 

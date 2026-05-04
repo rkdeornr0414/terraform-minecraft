@@ -48,14 +48,13 @@ jobs:
 
       # ── 5. Acquire/build the deployable image
       #
-      # Option A (default): re-tag the pinned upstream itzg image.
+      # re-tag the pinned upstream itzg image.
       #   No Dockerfile needed; fast and reproducible.
-      # Option B: build from Dockerfile.
       - name: Set ECR registry URL
         run: |
           echo "ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}" >> "$GITHUB_ENV"
 
-      # Option A – Re-tag upstream image
+      #  Re-tag upstream image
       - name: Pull upstream itzg image and re-tag for ECR
         run: |
           IMAGE_TAG="${{ steps.meta.outputs.IMAGE_TAG }}"
@@ -64,7 +63,7 @@ jobs:
             "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           echo "Tagged as: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-      # Option B – Build from Dockerfile (uncomment if using custom Dockerfile)
+      # Build from Dockerfile 
       # - name: Build image from Dockerfile
       #   run: |
       #     IMAGE_TAG="${{ steps.meta.outputs.IMAGE_TAG }}"

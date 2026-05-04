@@ -7,23 +7,6 @@ terraform {
       version = "~> 5.0"
     }
   }
-
-  # State is stored LOCALLY in terraform.tfstate (default).
-  # Rationale for AWS Academy: Academy sessions are ephemeral and S3-backed
-  # remote state would require a persistent bucket with versioning that
-  # survives session expiry.  Local state is committed to the Git repository
-  # (terraform.tfstate is git-ignored in production; here it is intentionally
-  # kept local and treated as a single-operator workflow).
-  # If you move to a persistent AWS account, replace this block with:
-  #
-  #   backend "s3" {
-  #     bucket         = "mc-tfstate-<account-id>"
-  #     key            = "minecraft/terraform.tfstate"
-  #     region         = "us-east-1"
-  #     dynamodb_table = "mc-tfstate-lock"
-  #     encrypt        = true
-  #   }
-
 }
 
 provider "aws" {
