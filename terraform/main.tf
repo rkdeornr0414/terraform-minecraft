@@ -8,7 +8,6 @@ terraform {
     }
   }
 
-  # ── State Management ────────────────────────────────────────────────────────
   # State is stored LOCALLY in terraform.tfstate (default).
   # Rationale for AWS Academy: Academy sessions are ephemeral and S3-backed
   # remote state would require a persistent bucket with versioning that
@@ -24,16 +23,15 @@ terraform {
   #     dynamodb_table = "mc-tfstate-lock"
   #     encrypt        = true
   #   }
-  # ────────────────────────────────────────────────────────────────────────────
+
 }
 
 provider "aws" {
   region = var.aws_region
 }
 
-# ── Data sources: reference pre-existing resources ──────────────────────────
+# ── Data sources: reference pre-existing resources 
 
-# Default VPC – AWS Academy accounts always have this; no need to create one.
 data "aws_vpc" "default" {
   default = true
 }
@@ -46,14 +44,12 @@ data "aws_subnets" "public" {
   }
 }
 
-# Pre-existing IAM instance profile created by AWS Academy (LabInstanceProfile
-# wraps LabRole).  Attaching it lets the EC2 instance authenticate to ECR and
-# write to S3 via instance-metadata credentials – no keys on disk.
+# write to S3 via instance-metadata credentials  no keys on disk.
 data "aws_iam_instance_profile" "lab" {
   name = var.instance_profile_name
 }
 
-# ── Security Group 
+# Security Group 
 
 resource "aws_security_group" "minecraft" {
   name        = "minecraft-sg-${var.student_id}"
